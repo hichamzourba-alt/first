@@ -36,6 +36,20 @@ URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 DELIVERABLE_STATUSES = {"verified", "risky"}
 
+# Consumer mailbox providers. Cold outreach runs on B2B legitimate interest,
+# which covers business addresses only, so first-touch mail to a private
+# mailbox is blocked. Replies are exempt: the person wrote to us from it.
+FREE_MAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "msn.com", "yahoo.com", "icloud.com", "me.com", "aol.com", "gmx.com",
+    "gmx.net", "proton.me", "protonmail.com", "mail.com",
+    # Belgium / Netherlands consumer providers
+    "hotmail.be", "hotmail.nl", "outlook.be", "outlook.nl", "live.be", "live.nl",
+    "yahoo.be", "yahoo.nl", "telenet.be", "skynet.be", "proximus.be", "scarlet.be",
+    "ziggo.nl", "kpnmail.nl", "planet.nl", "hetnet.nl", "home.nl", "xs4all.nl",
+    "casema.nl", "chello.nl", "upcmail.nl", "online.nl", "tele2.nl",
+})
+
 
 @dataclass
 class GateResult:
@@ -63,6 +77,8 @@ def pre_send_check(
     # Recipient sanity
     if not EMAIL_RE.match(to_email):
         reasons.append(f"invalid recipient address '{to_email}'")
+    elif kind != "reply" and to_email.rsplit("@", 1)[-1] in FREE_MAIL_DOMAINS:
+        reasons.append("recipient is a personal mailbox (free-mail domain), not a business address")
     if prospect is not None:
         if (prospect.email or "").strip().lower() != to_email:
             reasons.append("recipient does not match the prospect record")

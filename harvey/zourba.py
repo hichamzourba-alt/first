@@ -11,6 +11,13 @@ This module makes Harvey a citizen of that queue instead of a second inbox:
            Harvey's sender sends it on schedule — through the same
            deterministic pre-send gate as every other email. ``rejected``
            rejects it.
+  skills   Sales' product knowledge and battle cards (kept in the private
+           company repo, at ``02-sales/work/harvey/``) are copied into
+           ``skills/`` so the writer and handler use the latest version.
+  suppress The GDPR suppression list (``06-cold-callers/work/SUPPRESSION.md``)
+           is applied first: listed emails and domains become ``opted_out``
+           and their queued email is cancelled. Opt-outs Harvey received are
+           appended to that list the same day.
   report   Once Harvey has sent, cancelled or failed an item, the file's
            status is updated; sent files move to ``OUTBOX/sent/``.
 
@@ -25,6 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from harvey.paths import PROJECT_ROOT
 from harvey.state import StateManager
 
 BODY_START = "<!-- harvey:body -->"
@@ -32,6 +40,14 @@ BODY_END = "<!-- /harvey:body -->"
 
 # Harvey outbox status → OUTBOX file status, for items that are finished.
 _TERMINAL = {"sent": "sent", "cancelled": "cancelled", "failed": "failed", "rejected": "rejected"}
+
+# Skill files Sales maintains in the company repo, relative to OUTBOX/.
+SKILL_SOURCE = Path("..") / "02-sales" / "work" / "harvey"
+SKILL_FILES = ("product_knowledge.md", "competitive_intel.md")
+SUPPRESSION_FILE = Path("..") / "06-cold-callers" / "work" / "SUPPRESSION.md"
+
+_EMAIL_RE = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
+_DOMAIN_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b")
 
 _HEADER_RE = re.compile(r"^([a-z][a-z-]*):[ \t]*(.*)$")
 
@@ -42,12 +58,17 @@ class SyncReport:
     approved: list[str] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
     closed: list[str] = field(default_factory=list)   # sent/cancelled/failed written back
+    skills: list[str] = field(default_factory=list)   # skill files refreshed
+    suppressed: list[str] = field(default_factory=list)  # prospects stopped by the list
+    logged_opt_outs: list[str] = field(default_factory=list)  # added to the list
     problems: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"exported {len(self.exported)}, approved {len(self.approved)}, "
             f"rejected {len(self.rejected)}, closed {len(self.closed)}, "
+            f"skills {len(self.skills)}, suppressed {len(self.suppressed)}, "
+            f"opt-outs logged {len(self.logged_opt_outs)}, "
             f"problems {len(self.problems)}"
         )
 
@@ -154,11 +175,106 @@ def _index(outbox_dir: Path) -> dict[str, Path]:
     return found
 
 
-async def sync(state: StateManager, outbox_dir: str | Path, dry_run: bool = False) -> SyncReport:
+def sync_skills(outbox: Path, skills_dir: Path, report: SyncReport, dry_run: bool = False):
+    """Copy Sales' skill files into Harvey when they changed."""
+    source = outbox / SKILL_SOURCE
+    for name in SKILL_FILES:
+        src = source / name
+        if not src.is_file():
+            continue
+        text = src.read_text(encoding="utf-8")
+        dest = skills_dir / name
+        if dest.is_file() and dest.read_text(encoding="utf-8") == text:
+            continue
+        if not dry_run:
+            dest.write_text(text, encoding="utf-8")
+        report.skills.append(name)
+
+
+def parse_suppression(text: str) -> tuple[set[str], set[str]]:
+    """Emails and domains named in the suppression table's data rows."""
+    emails: set[str] = set()
+    domains: set[str] = set()
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|") or set(line.strip()) <= set("|-: "):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0].lower() == "date":
+            continue
+        row = " ".join(cells[1:3]).lower()  # Company + Contact columns
+        found = {e.lower() for e in _EMAIL_RE.findall(row)}
+        emails |= found
+        rest = _EMAIL_RE.sub(" ", row)
+        domains |= {d.removeprefix("www.") for d in _DOMAIN_RE.findall(rest)}
+    return emails, domains
+
+
+async def _prospects_matching(state: StateManager, emails: set[str], domains: set[str]) -> list:
+    out = []
+    async with state._connect() as db:
+        async with db.execute(
+            "SELECT p.id, p.email, COALESCE(c.domain, '') FROM prospects p "
+            "LEFT JOIN companies c ON c.id = p.company_id "
+            "WHERE p.status != 'opted_out'"
+        ) as cursor:
+            for pid, email, cdomain in await cursor.fetchall():
+                email = (email or "").lower()
+                edomain = email.rsplit("@", 1)[-1] if "@" in email else ""
+                cdomain = (cdomain or "").lower().removeprefix("www.")
+                if email in emails or edomain in domains or cdomain in domains:
+                    out.append((pid, email or cdomain))
+    return out
+
+
+async def apply_suppression(state: StateManager, outbox: Path, report: SyncReport, dry_run: bool):
+    path = outbox / SUPPRESSION_FILE
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    emails, domains = parse_suppression(text)
+
+    # Listed people/companies → stop everything.
+    for pid, label in await _prospects_matching(state, emails, domains):
+        report.suppressed.append(label)
+        if not dry_run:
+            await state.update_prospect_status(pid, "opted_out")
+            await state.cancel_pending_outbox_for_prospect(pid, reason="suppression list")
+            await state.log_action("suppressed", "zourba", {"prospect_id": pid})
+
+    # Opt-outs Harvey received → the list, same day (GDPR rule 3).
+    new_rows = []
+    for prospect in await state.get_prospects_by_status("opted_out"):
+        email = (prospect.email or "").lower()
+        if not email or email in emails or email.rsplit("@", 1)[-1] in domains:
+            continue
+        company = prospect.company
+        if prospect.company_id:
+            c = await state.get_company(prospect.company_id)
+            company = (c.name if c else "") or company
+        new_rows.append(
+            f"| {datetime.now(timezone.utc):%Y-%m-%d} | {company or '—'} | "
+            f"{prospect.full_name() or '—'} <{email}> | opt-out (email reply) | Harvey (auto) |"
+        )
+        emails.add(email)
+        report.logged_opt_outs.append(email)
+    if new_rows and not dry_run:
+        path.write_text(text.rstrip("\n") + "\n" + "\n".join(new_rows) + "\n", encoding="utf-8")
+
+
+async def sync(
+    state: StateManager,
+    outbox_dir: str | Path,
+    dry_run: bool = False,
+    skills_dir: str | Path | None = None,
+) -> SyncReport:
     outbox = Path(outbox_dir)
     if not outbox.is_dir():
         raise FileNotFoundError(f"OUTBOX folder not found: {outbox}")
     report = SyncReport()
+    sync_skills(outbox, Path(skills_dir) if skills_dir else PROJECT_ROOT / "skills", report, dry_run)
+    # Suppression runs before approvals, so a suppressed prospect's draft is
+    # cancelled rather than approved.
+    await apply_suppression(state, outbox, report, dry_run)
     files = _index(outbox)
 
     # 1. Decisions in the files → Harvey.

@@ -12,6 +12,7 @@ import pytest_asyncio
 from harvey.models.company import Company
 from harvey.models.prospect import Prospect
 from harvey.state import StateManager
+from harvey import zourba
 from harvey.zourba import parse_body, parse_headers, set_header, sync
 
 
@@ -23,7 +24,14 @@ async def env():
         outbox = Path(tmpdir) / "OUTBOX"
         outbox.mkdir()
         (outbox / "README.md").write_text("status: not-a-draft\n")
-        yield sm, outbox
+        skills = Path(tmpdir) / "skills"
+        skills.mkdir()
+        orig = zourba.PROJECT_ROOT
+        zourba.PROJECT_ROOT = Path(tmpdir)  # never touch the real skills/
+        try:
+            yield sm, outbox
+        finally:
+            zourba.PROJECT_ROOT = orig
 
 
 async def _queue(sm, email="d.jansen@acme-it.nl", body="Beste Dirk,\n\nHoe vangen jullie de avonduren op?"):
@@ -183,3 +191,83 @@ async def test_dashboard_approve_and_decline_buttons(env):
     _dashboard_decide(new, "rejected")
     await sync(sm, outbox)
     assert (await sm.get_outbox_item(b))["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_skills_copied_from_sales_folder(env):
+    sm, outbox = env
+    src = outbox.parent / "02-sales" / "work" / "harvey"
+    src.mkdir(parents=True)
+    (src / "product_knowledge.md").write_text("# PK v1\n")
+    dest = outbox.parent / "skills" / "product_knowledge.md"
+
+    report = await sync(sm, outbox)
+    assert report.skills == ["product_knowledge.md"]
+    assert dest.read_text() == "# PK v1\n"
+    assert (await sync(sm, outbox)).skills == []          # unchanged → no copy
+
+    (src / "product_knowledge.md").write_text("# PK v2\n")
+    assert (await sync(sm, outbox, dry_run=True)).skills == ["product_knowledge.md"]
+    assert dest.read_text() == "# PK v1\n"
+    await sync(sm, outbox)
+    assert dest.read_text() == "# PK v2\n"
+
+
+SUPPRESSION = """# Suppression List
+
+| Date | Company | Contact | Reason | Logged by |
+|---|---|---|---|---|
+| — | — | — | — | — |
+| 2026-10-01 | Beta ICT (beta.be) | — | deletion request | Lina |
+| 2026-10-02 | Gamma | Jo <jo@gamma.nl> | opt-out | Lina |
+"""
+
+
+@pytest.mark.asyncio
+async def test_suppression_list_cancels_and_logs(env):
+    sm, outbox = env
+    sup = outbox.parent / "06-cold-callers" / "work" / "SUPPRESSION.md"
+    sup.parent.mkdir(parents=True)
+    sup.write_text(SUPPRESSION)
+
+    ok = await _queue(sm)                                    # acme-it.nl: not listed
+    beta = await _queue(sm, email="an@beta.be")              # domain listed
+    gamma = await _queue(sm, email="jo@gamma.nl")            # email listed
+    report = await sync(sm, outbox)
+    assert sorted(report.suppressed) == ["an@beta.be", "jo@gamma.nl"]
+    assert (await sm.get_outbox_item(ok))["status"] == "pending_review"
+    assert (await sm.get_outbox_item(beta))["status"] == "cancelled"
+    assert (await sm.get_outbox_item(gamma))["status"] == "cancelled"
+    assert len(report.exported) == 1                          # only the clean one
+    assert report.logged_opt_outs == []                       # already listed
+
+    # An opt-out Harvey received gets appended once.
+    item = await sm.get_outbox_item(ok)
+    await sm.update_prospect_status(item["prospect_id"], "opted_out")
+    report = await sync(sm, outbox)
+    assert report.logged_opt_outs == ["d.jansen@acme-it.nl"]
+    text = sup.read_text()
+    assert "Dirk Jansen <d.jansen@acme-it.nl> | opt-out (email reply) | Harvey (auto) |" in text
+    assert (await sync(sm, outbox)).logged_opt_outs == []
+    assert text.count("acme-it.nl") == 1
+
+
+def test_gate_blocks_free_mail_except_replies():
+    from harvey.gate import pre_send_check
+    p = Prospect(first_name="A", last_name="B", title="CEO", email="a@telenet.be", email_status="verified")
+    blocked = pre_send_check("a@telenet.be", "avonduren", "Beste A, een vraag?", prospect=p)
+    assert not blocked and any("personal mailbox" in r for r in blocked.reasons)
+    assert pre_send_check("a@telenet.be", "re: avonduren", "Dank je.", prospect=p, kind="reply")
+
+
+@pytest.mark.asyncio
+async def test_forget_prospect_erases_everything(env):
+    sm, outbox = env
+    item_id = await _queue(sm)
+    keep = await _queue(sm, email="other@acme-it.nl")
+    await sm.log_action("opt_out", "handler", {"prospect_email": "d.jansen@acme-it.nl"})
+    counts = await sm.forget_prospect("D.Jansen@acme-it.nl")
+    assert counts["prospects"] == 1 and counts["outbox"] == 1 and counts["actions"] == 1
+    assert await sm.get_outbox_item(item_id) is None
+    assert await sm.get_prospect_by_email("d.jansen@acme-it.nl") is None
+    assert await sm.get_outbox_item(keep) is not None

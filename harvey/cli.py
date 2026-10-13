@@ -543,6 +543,24 @@ def cmd_sending(args):
     asyncio.run(_run())
 
 
+def cmd_forget(args):
+    """GDPR erasure request: delete one person from Harvey's database."""
+    from harvey.state import StateManager
+
+    async def _run():
+        state = StateManager()
+        await state.init_db()
+        counts = await state.forget_prospect(args.email)
+        if not counts.get("prospects") and not counts.get("outbox"):
+            print(f"\n  Nothing stored for {args.email}.\n")
+            return
+        detail = ", ".join(f"{n} {t}" for t, n in counts.items() if n)
+        print(f"\n  Deleted {args.email}: {detail}.")
+        print("  Keep the address on the suppression list so it is never re-contacted.\n")
+
+    asyncio.run(_run())
+
+
 def cmd_zourba(args):
     """Sync Harvey's outbox with the Zourba-Tech company repo's OUTBOX/."""
     import os
@@ -555,13 +573,24 @@ def cmd_zourba(args):
     outbox = args.outbox or os.environ.get("ZOURBA_OUTBOX", "")
     if not outbox:
         print("\n  Point Harvey at the company repo's OUTBOX folder:")
-        print("    harvey zourba sync --outbox ../zourba-company/OUTBOX")
+        print(f"    harvey zourba {args.zourba_action} --outbox ../zourba-company/OUTBOX")
         print("  or set ZOURBA_OUTBOX in .env.\n")
         sys.exit(1)
 
     async def _run():
         state = StateManager()
         await state.init_db()
+        if args.zourba_action == "setup":
+            # One-time: turn on every free signal still awaiting a decision
+            # (never re-enables one you switched off), then sync.
+            from harvey.signals import seed_signal_catalog
+            await seed_signal_catalog(state)
+            free = [c["code"] for c in await state.get_signal_codes(status="proposed")
+                    if (c["cost_note"] or "").lower().startswith(("free", "included"))]
+            if not args.dry_run:
+                for code in free:
+                    await state.set_signal_status(code, "confirmed")
+            print(f"\n  Free signals {'to confirm' if args.dry_run else 'confirmed'}: {len(free)}")
         report = await sync(state, outbox, dry_run=args.dry_run)
         label = "Dry run" if args.dry_run else "Synced"
         print(f"\n  {label} with {outbox}: {report.summary()}")
@@ -570,6 +599,9 @@ def cmd_zourba(args):
             ("Approved (will send on schedule)", report.approved),
             ("Rejected", report.rejected),
             ("Status written back", report.closed),
+            ("Skills refreshed from 02-sales", report.skills),
+            ("Stopped by the suppression list", report.suppressed),
+            ("Opt-outs added to SUPPRESSION.md", report.logged_opt_outs),
             ("Problems", report.problems),
         ):
             if rows:
@@ -699,11 +731,18 @@ def main():
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")
     sub.set_defaults(func=cmd_usage)
 
+    # harvey forget <email>
+    sub = subparsers.add_parser(
+        "forget", help="GDPR erasure: delete one person and their emails/notes")
+    sub.add_argument("email", help="The person's email address")
+    sub.set_defaults(func=cmd_forget)
+
     # harvey zourba sync
     sub = subparsers.add_parser(
         "zourba", help="Sync the outbox with the Zourba-Tech OUTBOX/ approval queue")
-    sub.add_argument("zourba_action", choices=["sync"],
-                     help="sync: export drafts, import approvals, write back sent status")
+    sub.add_argument("zourba_action", choices=["setup", "sync"],
+                     help="sync: suppression list, skills, drafts out, approvals in, "
+                          "sent status back; setup: confirm free signals, then sync")
     sub.add_argument("--outbox", default="",
                      help="Path to zourba-company/OUTBOX (default: $ZOURBA_OUTBOX)")
     sub.add_argument("--dry-run", action="store_true",

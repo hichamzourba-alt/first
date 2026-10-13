@@ -703,6 +703,37 @@ class StateManager:
 
     # ── Email pattern cache (per-domain) ──
 
+    async def forget_prospect(self, email: str) -> dict[str, int]:
+        """GDPR erasure: delete a person and everything recorded about them.
+
+        Keep their address on the suppression list separately; that is what
+        stops them being rediscovered and contacted again."""
+        email = _norm(email)
+        counts: dict[str, int] = {}
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT id FROM prospects WHERE email = ?", (email,)
+            ) as cursor:
+                ids = [r[0] for r in await cursor.fetchall()]
+            for table in ("outbox", "conversations", "observations"):
+                n = 0
+                for pid in ids:
+                    cur = await db.execute(f"DELETE FROM {table} WHERE prospect_id = ?", (pid,))
+                    n += cur.rowcount
+                counts[table] = n
+            cur = await db.execute(
+                "DELETE FROM outbox WHERE to_email = ?", (email,)
+            )
+            counts["outbox"] += cur.rowcount
+            cur = await db.execute(
+                "DELETE FROM actions WHERE details_json LIKE ?", (f"%{email}%",)
+            )
+            counts["actions"] = cur.rowcount
+            cur = await db.execute("DELETE FROM prospects WHERE email = ?", (email,))
+            counts["prospects"] = cur.rowcount
+            await db.commit()
+        return counts
+
     async def get_email_pattern(self, domain: str) -> dict | None:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row

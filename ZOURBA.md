@@ -12,36 +12,41 @@ the reply. This file covers what is different from upstream Harvey.
 | `persona.language` setting; the writer writes every email in it (default `English`, set to `Dutch`) | `harvey/config.py`, `harvey/agents/writer.py`, `prompts/writer.md` |
 | `channels.email.footer`: Dutch sender + opt-out line appended to every outreach email at send time | `harvey/config.py`, `harvey/agents/sender.py` |
 | Reply handler answers in the prospect's language | `prompts/handler.md` |
-| `harvey zourba sync`: bridge to the company repo's `OUTBOX/` | `harvey/zourba.py`, `harvey/cli.py`, `tests/test_zourba.py` |
+| `harvey zourba sync`: bridge to the company repo — suppression list, Sales' skill files, drafts out to `OUTBOX/`, approvals back in, sent status written back | `harvey/zourba.py`, `harvey/cli.py`, `tests/test_zourba.py` |
+| `harvey zourba setup`: one-time — confirms every free signal, then syncs | `harvey/cli.py` |
+| Pre-send gate blocks first-touch mail to free-mail/consumer domains (gmail, telenet.be, ziggo.nl…) | `harvey/gate.py` |
+| `harvey forget <email>`: GDPR erasure of one person | `harvey/state.py`, `harvey/cli.py` |
 
 All facts in `harvey.yaml` come from `zourba-company/COMPANY.md` (commercial model,
 markets, language policy). If the charter changes, update the YAML.
 
 ## Setup (once, on Hicham's machine)
 
+Clone both repos side by side, then:
+
 ```bash
-git clone <this repo> harvey && cd harvey
+cd first
 python3.13 -m venv .venv && source .venv/bin/activate && pip install -e .
-cp .env.example .env
+cp .env.example .env          # then fill in the three items below
+harvey gmail auth             # log in as sales@zourba-tech.be
+harvey zourba setup           # confirms free signals, pulls Sales' skill files
+harvey discover               # free OpenStreetMap source, BE/NL cities
+harvey run                    # heartbeat loop
 ```
 
 In `.env`:
 
-1. **Mailbox.** `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET`, then `harvey gmail auth`.
-   Use a dedicated outreach mailbox/domain with SPF, DKIM and DMARC — not the main
-   `zourba-tech.be` inbox. Update `persona.email` in `harvey.yaml` to match.
-2. **Verifier.** `REOON_API_KEY` (free tier). Without one, addresses stay `guess` and
-   are never sent to.
-3. **`ZOURBA_OUTBOX`** = absolute path to `zourba-company/OUTBOX`.
+1. `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET`: Google Cloud Console, enable the Gmail API,
+   create an OAuth client of type "Desktop app". The mailbox is **sales@zourba-tech.be**;
+   it needs SPF, DKIM and DMARC on zourba-tech.be.
+2. `REOON_API_KEY`: free tier at reoon.com. Without a verifier, addresses stay `guess`
+   and are never sent to.
+3. `ZOURBA_OUTBOX=/path/to/zourba-company/OUTBOX`.
 
-Then:
-
-```bash
-harvey train https://zourba-tech.be   # writes skills/product_knowledge.md
-harvey signals --confirm free         # what to look for (costs nothing)
-harvey discover                       # free OpenStreetMap source, BE/NL cities
-harvey run                            # heartbeat loop
-```
+**No `harvey train`.** zourba-tech.be's content is already captured, more accurately, in
+the company repo's sales docs. Product knowledge and battle cards live in
+`zourba-company/02-sales/work/harvey/` (private) and every `harvey zourba sync` copies
+them into `skills/`. This repo is public, so rates and positioning stay out of it.
 
 Per the charter, spending money (paid discovery providers, verifier upgrades) needs
 Hicham's yes first. The defaults above cost nothing.
@@ -66,6 +71,9 @@ Harvey writes draft ─► harvey zourba sync ─► OUTBOX/<date>-sales-harvey-
 - Approved emails still pass Harvey's deterministic gate (banned phrases, length,
   unrendered merge tags, deliverable address) and respect the daily cap, quiet hours,
   stop-on-reply and the bounce kill switch.
+- Every sync first applies `06-cold-callers/work/SUPPRESSION.md`: listed emails and
+  domains are stopped and their queued mail cancelled. Opt-outs Harvey receives are
+  appended to that list the same day.
 - `harvey zourba sync --dry-run` shows what would change without writing.
 - `harvey sending pause` stops everything immediately.
 - Approving in Harvey's own dashboard (`harvey dashboard`) also works; the next sync
@@ -76,8 +84,9 @@ Run `harvey zourba sync` before and after the daily run (or on a cron next to
 
 ## Compliance
 
-Outreach to BE/NL businesses falls under GDPR and the ePrivacy rules: B2B cold email
-to a role address or a named decision-maker needs a legitimate-interest basis, a clear
-sender identity, and a working opt-out in every email. `channels.email.footer` in
-`harvey.yaml` adds that line to every outreach email; don't empty it. Have Mehdi (10-security) sign off
-on the data Harvey stores in `data/harvey.db` before the first send.
+Reviewed against Zourba-Tech's GDPR rules in
+`zourba-company/10-security/work/HARVEY-GDPR-REVIEW-2026-10-13.md`. In short: business
+addresses only (free-mail domains blocked by the gate), source URL on every fact,
+suppression list enforced both ways, opt-out footer on every outreach email (don't empty
+`channels.email.footer`), erasure with `harvey forget <email>`, and the database stays
+local (`data/` is gitignored).
