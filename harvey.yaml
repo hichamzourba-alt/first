@@ -1,0 +1,111 @@
+# Harvey configured for Zourba-Tech (Z-Tech).
+# Source of truth for the business facts below: zourba-company/COMPANY.md.
+# If the charter changes (pricing, markets, offer), update this file to match.
+
+persona:
+  name: "Hicham"
+  company: "Zourba-Tech"
+  role: "Founder"
+  # TODO(Hicham): the sending mailbox. Use a dedicated outreach domain/mailbox
+  # with SPF/DKIM/DMARC set up, not your main inbox.
+  email: "sales@zourba-tech.be"
+  linkedin: ""
+  tone: "direct, practical, peer-to-peer; one MSP operator talking to another"
+  # BE/NL is the first market, so outreach is in Dutch (charter language policy).
+  # Switch to "English" when running a UK/IE or US/CA campaign.
+  language: "Dutch"
+
+product:
+  name: "Zourba-Tech nearshore engineers"
+  description: >-
+    Remote IT engineers from Tanger, Morocco (GMT+1, same timezone as BE/NL),
+    medior and up, placed into MSP teams: support L2/L3, network, endpoint and
+    identity, cloud and infrastructure, software development, data and security.
+    Core offer for MSPs: drop-in L2/L3 engineers and after-hours coverage.
+  pricing: "Fixed day rates per profile, quoted on request. 1-year engagements or fixed-scope projects."
+  key_benefits:
+    - "Same timezone as Belgium and the Netherlands (GMT+1)"
+    - "Roughly half the cost of a local engineer, at a fixed day rate"
+    - "No recruitment risk: engineer replaced within 2 months on request"
+    - "Evening and night shifts cover your after-hours (+25% on those hours only)"
+    - "Medior and senior engineers only, no juniors"
+  objection_responses:
+    "too expensive": "Understood. We quote a fixed day rate per profile, usually around half a local rate. Which role is hardest for you to fill right now? I can price that one exactly."
+    "already have a solution": "Makes sense. Where does it fall short today: escalations, after-hours, or peak capacity?"
+    "not interested": "No problem, thanks for letting me know. I won't follow up."
+    "offshore quality": "Fair concern. We only place medior and senior engineers, and if one isn't a fit we replace them within 2 months."
+    "language": "Our engineers work in English with your team and your clients' tickets. Tell me which languages your clients need and I'll check fit before proposing anyone."
+  offer:
+    primary: "A dedicated L2/L3 engineer on a 1-year engagement, fixed day rate"
+    entry: "A 20-minute call to see whether one of our profiles fits a role you can't fill"
+    goal: "book_call"
+    booking_method: "suggest_times"
+    booking_url: ""
+    meeting_duration: "20 minutes"
+    meeting_owner: "Hicham"
+
+icp:
+  industries:
+    - "Managed Service Provider"
+    - "IT Services"
+    - "IT Support"
+    - "Cloud Hosting"
+  company_size: "10-100 employees"
+  titles:
+    - "Managing Director"
+    - "Owner"
+    - "CEO"
+    - "CTO"
+    - "Operations Manager"
+    - "Service Delivery Manager"
+    - "Head of Service Desk"
+  # Market 1 (charter): Belgium / Netherlands. Cities geocode themselves.
+  geography:
+    - "Antwerpen, Belgium"
+    - "Gent, Belgium"
+    - "Brussel, Belgium"
+    - "Leuven, Belgium"
+    - "Hasselt, Belgium"
+    - "Rotterdam, Netherlands"
+    - "Utrecht, Netherlands"
+    - "Eindhoven, Netherlands"
+    - "Amsterdam, Netherlands"
+  # An MSP hiring for these roles is short on exactly what we place.
+  hiring_signals:
+    - "Servicedesk Medewerker"
+    - "System Engineer"
+    - "Systeembeheerder"
+    - "Netwerkbeheerder"
+    - "Cloud Engineer"
+    - "L2 Support"
+    - "L3 Support"
+    - "Support Engineer"
+
+channels:
+  email:
+    enabled: true
+    provider: "gmail"          # gmail (recommended) | smtp | instantly
+    # Low while the outreach domain warms up. Raise gradually.
+    max_daily_sends: 20
+    # Added below every outreach email at send time (GDPR/ePrivacy opt-out).
+    footer: |-
+      Zourba-Tech, nearshore IT-capaciteit uit Tanger. zourba-tech.be
+      Liever geen mails meer van ons? Laat het weten en we verwijderen je gegevens.
+    # Charter autonomy policy: nothing sends without Hicham. Approve in the
+    # Harvey dashboard, or via zourba-company/OUTBOX (`harvey zourba sync`).
+    require_approval: true
+    send_to_risky: false
+    max_bounce_rate: 0.05
+  linkedin:
+    # Charter: agents draft LinkedIn messages, Hicham sends them himself.
+    enabled: false
+    max_daily_connections: 0
+    max_daily_messages: 0
+
+usage:
+  max_daily_claude_percent: 80
+  heartbeat_interval_minutes: 15
+  quiet_hours:
+    start: "19:00"
+    end: "08:00"
+    timezone: "Europe/Brussels"
