@@ -2,6 +2,7 @@
 reject, and write-back of sent status."""
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -142,3 +143,43 @@ def test_set_header_adds_missing_key():
     out = set_header(text, "sent-at", "now")
     assert parse_headers(out) == {"to": "x", "status": "pending", "sent-at": "now"}
     assert out.endswith("\nbody\n")
+
+
+def _dashboard_decide(path: Path, decision: str) -> Path:
+    """Mirror zourba-company/dashboard/server.mjs decideOutbox()."""
+    c = path.read_text()
+    c = re.sub(r"(?m)^status:.*$", f"status: {decision}", c, count=1)
+    note = f"\n> {'APPROVED' if decision == 'approved' else 'DECLINED'} by Hicham via dashboard, 2026-10-13 18:00.\n"
+    i = c.index("\n\n")
+    c = c[:i] + "\n" + note + c[i:]
+    path.write_text(c)
+    if decision == "rejected":
+        dest = path.parent / "declined" / path.name
+        dest.parent.mkdir(exist_ok=True)
+        path.rename(dest)
+        return dest
+    return path
+
+
+@pytest.mark.asyncio
+async def test_dashboard_approve_and_decline_buttons(env):
+    sm, outbox = env
+    a = await _queue(sm, email="a@acme-it.nl")
+    await sync(sm, outbox)
+    path = _only_draft(outbox)
+    _dashboard_decide(path, "approved")
+    await sync(sm, outbox)
+    item = await sm.get_outbox_item(a)
+    assert item["status"] == "approved"
+    assert item["body"] == "Beste Dirk,\n\nHoe vangen jullie de avonduren op?"
+
+    company_id = await sm.add_company(Company(name="Beta ICT", domain="beta.be"))
+    pid = await sm.add_prospect(Prospect(company_id=company_id, first_name="An", last_name="Peeters",
+                                         title="CEO", email="an@beta.be", email_status="verified"))
+    b = await sm.add_outbox_item(prospect_id=pid, to_email="an@beta.be", subject="s", body="b",
+                                 send_at="2026-10-14T08:30:00", campaign_id="c2")
+    report = await sync(sm, outbox)
+    new = outbox / report.exported[0]
+    _dashboard_decide(new, "rejected")
+    await sync(sm, outbox)
+    assert (await sm.get_outbox_item(b))["status"] == "rejected"
